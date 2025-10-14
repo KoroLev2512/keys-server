@@ -1,21 +1,23 @@
+// index.js (Render)
 const express = require('express');
 const Busboy = require('busboy');
 const forge = require('node-forge');
 
-// Для редких окружений без TextEncoder/TextDecoder:
+// Полезные полифилы для некоторых окружений
 try {
   global.TextEncoder = global.TextEncoder || require('util').TextEncoder;
   global.TextDecoder = global.TextDecoder || require('util').TextDecoder;
-} catch { /* ок */ }
+} catch {}
 
 const app = express();
 
+// /login — ровно "korolev" без перевода строки
 app.get('/login', (req, res) => {
   res.type('text/plain; charset=utf-8').send('korolev');
 });
 
 app.post('/decypher', (req, res) => {
-  const busboy = new Busboy({ headers: req.headers });
+  const busboy = new Busboy({ headers: req.headers, limits: { fileSize: 5 * 1024 * 1024 } });
 
   let privateKeyPem = '';
   let encryptedBuffer = Buffer.alloc(0);
@@ -35,51 +37,47 @@ app.post('/decypher', (req, res) => {
 
   busboy.on('finish', () => {
     if (!privateKeyPem || encryptedBuffer.length === 0) {
-      return res.status(400).type('text/plain').send("missing key/secret");
+      return res.status(400).type('text/plain').send('missing key/secret');
     }
 
     try {
+      // Парсим приватный ключ (PKCS#1 или PKCS#8, без пароля)
       const priv = forge.pki.privateKeyFromPem(privateKeyPem);
 
       // Поддержка текстовых представлений секрета
-      let dataBytes = encryptedBuffer;
       const asText = encryptedBuffer.toString('utf8').trim();
       const b64urlLike = /^[A-Za-z0-9\-_]+={0,2}$/.test(asText);
-      const b64Like    = /^[A-Za-z0-9+/=\r\n]+$/.test(asText) && asText.replace(/\s+/g,'').length % 4 === 0;
-      const hexLike    = /^[0-9a-fA-F\r\n]+$/.test(asText) && asText.replace(/\s+/g,'').length % 2 === 0;
+      const b64Like    = /^[A-Za-z0-9+/=\r\n]+$/.test(asText) && asText.replace(/\s+/g, '').length % 4 === 0;
+      const hexLike    = /^[0-9a-fA-F\r\n]+$/.test(asText) && asText.replace(/\s+/g, '').length % 2 === 0;
 
+      let cipherBytes = encryptedBuffer;
       if (b64urlLike) {
-        const norm = asText.replace(/-/g, '+').replace(/_/g, '/').replace(/\s+/g,'');
-        dataBytes = Buffer.from(norm, 'base64');
+        const norm = asText.replace(/-/g, '+').replace(/_/g, '/').replace(/\s+/g, '');
+        cipherBytes = Buffer.from(norm, 'base64');
       } else if (b64Like) {
-        dataBytes = Buffer.from(asText.replace(/\s+/g,''), 'base64');
+        cipherBytes = Buffer.from(asText.replace(/\s+/g, ''), 'base64');
       } else if (hexLike) {
-        dataBytes = Buffer.from(asText.replace(/\s+/g,''), 'hex');
+        cipherBytes = Buffer.from(asText.replace(/\s+/g, ''), 'hex');
       }
 
-      // forge ожидает binary-string
-      const encBinary = dataBytes.toString('binary');
+      // forge ожидает "binary string" (каждый символ = байт)
+      const encBinary = forge.util.createBuffer(cipherBytes).getBytes();
 
-      // Пытаемся в порядке: OAEP(SHA-1) -> OAEP(SHA-256) -> PKCS#1 v1.5
-      let plaintext = null;
-      try {
-        plaintext = priv.decrypt(encBinary, 'RSA-OAEP', { md: forge.md.sha1.create() });
-      } catch {}
-      if (plaintext === null) {
+      // Попытки: OAEP(SHA-1), OAEP(SHA-256), PKCS#1 v1.5
+      const attempts = [
+        () => priv.decrypt(encBinary, 'RSA-OAEP', { md: forge.md.sha1.create(),  mgf1: forge.mgf.mgf1.create(forge.md.sha1.create()) }),
+        () => priv.decrypt(encBinary, 'RSA-OAEP', { md: forge.md.sha256.create(), mgf1: forge.mgf.mgf1.create(forge.md.sha256.create()) }),
+        () => priv.decrypt(encBinary, 'RSAES-PKCS1-V1_5')
+      ];
+
+      for (const attempt of attempts) {
         try {
-          plaintext = priv.decrypt(encBinary, 'RSA-OAEP', { md: forge.md.sha256.create() });
+          const plain = attempt();
+          return res.type('text/plain; charset=utf-8').send(plain);
         } catch {}
       }
-      if (plaintext === null) {
-        try {
-          plaintext = priv.decrypt(encBinary, 'RSAES-PKCS1-V1_5');
-        } catch {}
-      }
 
-      if (plaintext === null) {
-        return res.status(400).type('text/plain').send('cannot decrypt');
-      }
-      return res.type('text/plain; charset=utf-8').send(plaintext);
+      return res.status(400).type('text/plain').send('cannot decrypt');
     } catch (e) {
       return res.status(400).type('text/plain').send('Ошибка расшифровки: ' + e.message);
     }
@@ -88,7 +86,7 @@ app.post('/decypher', (req, res) => {
   req.pipe(busboy);
 });
 
-// Render фиксирует порт через env PORT
+// Render задаёт порт через env PORT
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server started on port ${PORT}`);
