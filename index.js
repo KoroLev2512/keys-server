@@ -1,115 +1,82 @@
-// index.js (Render)
-const express = require('express');
-const Busboy = require('busboy');
-const forge = require('node-forge');
-
-// Полезные полифилы для некоторых окружений
-try {
-  global.TextEncoder = global.TextEncoder || require('util').TextEncoder;
-  global.TextDecoder = global.TextDecoder || require('util').TextDecoder;
-} catch {}
+import express from "express";
+import multer from "multer";
+import forge from "node-forge";
 
 const app = express();
+const LOGIN = "korolev";
 
-// /login — ровно "korolev" без перевода строки
-app.get('/login', (req, res) => {
-  res.type('text/plain; charset=utf-8').send('korolev');
+// Настройка multer для обработки multipart/form-data
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB лимит
+  },
 });
 
-app.post('/decypher', (req, res) => {
-  const busboy = new Busboy({ headers: req.headers, limits: { fileSize: 5 * 1024 * 1024 } });
+// Маршрут для получения логина
+app.get("/login", (req, res) => {
+  res.type("text/plain").send(LOGIN);
+});
 
-  let privateKeyPem_file = '';
-  let privateKeyPem_field = '';
-  let encryptedBuffer_file = Buffer.alloc(0);
-  let encryptedBuffer_field = Buffer.alloc(0);
-  let filesProcessing = 0;
-  let finished = false;
-
-  function maybeProcess() {
-    if (finished && filesProcessing === 0) {
-      // Используем приоритет: файл > поле
-      const privateKeyPem = privateKeyPem_file || privateKeyPem_field;
-      const encryptedBuffer = encryptedBuffer_file.length ? encryptedBuffer_file : encryptedBuffer_field;
-
-      if (!privateKeyPem || encryptedBuffer.length === 0) {
-        return res.status(400).type('text/plain').send('missing key/secret');
+// Маршрут для расшифровки
+app.post(
+  "/decypher",
+  upload.fields([
+    { name: "key", maxCount: 1 },
+    { name: "secret", maxCount: 1 },
+  ]),
+  (req, res) => {
+    try {
+      // Проверяем наличие файлов
+      if (!req.files  !req.files.key  !req.files.secret) {
+        return res
+          .status(400)
+          .type("text/plain")
+          .send("Отсутствуют обязательные поля: key и secret");
       }
 
-      try {
-        const priv = forge.pki.privateKeyFromPem(privateKeyPem);
+      const keyFile = req.files.key[0];
+      const secretFile = req.files.secret[0];
 
-        const asText = encryptedBuffer.toString('utf8').trim();
-        const b64urlLike = /^[A-Za-z0-9\-_]+={0,2}$/.test(asText);
-        const b64Like    = /^[A-Za-z0-9+/=\r\n]+$/.test(asText) && asText.replace(/\s+/g, '').length % 4 === 0;
-        const hexLike    = /^[0-9a-fA-F\r\n]+$/.test(asText) && asText.replace(/\s+/g, '').length % 2 === 0;
+      // Получаем содержимое приватного ключа
+      const privateKeyPem = keyFile.buffer.toString("utf8");
 
-        let cipherBytes = encryptedBuffer;
-        if (b64urlLike) {
-          const norm = asText.replace(/-/g, '+').replace(/_/g, '/').replace(/\s+/g, '');
-          cipherBytes = Buffer.from(norm, 'base64');
-        } else if (b64Like) {
-          cipherBytes = Buffer.from(asText.replace(/\s+/g, ''), 'base64');
-        } else if (hexLike) {
-          cipherBytes = Buffer.from(asText.replace(/\s+/g, ''), 'hex');
-        }
+      // Получаем зашифрованные данные
+      const encryptedData = secretFile.buffer;
 
-        const encBinary = forge.util.createBuffer(cipherBytes).getBytes();
+      // Парсим приватный ключ
+      const privateKey = forge.pki.privateKeyFromPem(privateKeyPem);
 
-        const attempts = [
-          () => priv.decrypt(encBinary, 'RSA-OAEP', { md: forge.md.sha1.create(),  mgf1: forge.mgf.mgf1.create(forge.md.sha1.create()) }),
-          () => priv.decrypt(encBinary, 'RSA-OAEP', { md: forge.md.sha256.create(), mgf1: forge.mgf.mgf1.create(forge.md.sha256.create()) }),
-          () => priv.decrypt(encBinary, 'RSAES-PKCS1-V1_5')
-        ];
+      // Расшифровываем данные
+      const decrypted = privateKey.decrypt(
+        encryptedData.toString("binary"),
+        "RSA-OAEP"
+      );
 
-        for (const attempt of attempts) {
-          try {
-            const plain = attempt();
-            return res.type('text/plain; charset=utf-8').send(plain);
-          } catch {}
-        }
-
-        return res.status(400).type('text/plain').send('cannot decrypt');
-      } catch (e) {
-        return res.status(400).type('text/plain').send('Ошибка расшифровки: ' + e.message);
-      }
+      // Возвращаем результат как обычную строку
+      res.type("text/plain").send(decrypted);
+    } catch (error) {
+      console.error("Ошибка расшифровки:", error);
+      res
+        .status(400)
+        .type("text/plain")
+        .send(Ошибка расшифровки: ${error.message});
     }
   }
+);
 
-  busboy.on('file', (fieldname, file) => {
-    filesProcessing++;
-    const chunks = [];
-    file.on('data', d => chunks.push(d));
-    file.on('end', () => {
-      const buf = Buffer.concat(chunks);
-      if (fieldname === 'key') {
-        privateKeyPem_file = buf.toString('utf8');
-      } else if (fieldname === 'secret') {
-        encryptedBuffer_file = buf;
-      }
-      filesProcessing--;
-      maybeProcess();
-    });
-  });
-
-  busboy.on('field', (fieldname, val) => {
-    if (fieldname === 'key') {
-      privateKeyPem_field = val;
-    } else if (fieldname === 'secret') {
-      encryptedBuffer_field = Buffer.from(val, 'utf8');
-    }
-  });
-
-  busboy.on('finish', () => {
-    finished = true;
-    maybeProcess();
-  });
-
-  req.pipe(busboy);
+// Корневой маршрут
+app.get("/", (req, res) => {
+  res.type("text/plain").send("ok");
 });
 
-// Render задаёт порт через env PORT
+// Обработка ошибок
+app.use((err, req, res, next) => {
+  console.error("Ошибка сервера:", err);
+  res.status(500).type("text/plain").send("Внутренняя ошибка сервера");
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Server started on port ${PORT}`);
+  console.log(Сервер запущен на порту ${PORT});
 });
