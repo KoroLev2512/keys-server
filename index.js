@@ -19,13 +19,19 @@ app.get('/login', (req, res) => {
 app.post('/decypher', (req, res) => {
   const busboy = new Busboy({ headers: req.headers, limits: { fileSize: 5 * 1024 * 1024 } });
 
-  let privateKeyPem = '';
-  let encryptedBuffer = Buffer.alloc(0);
+  let privateKeyPem_file = '';
+  let privateKeyPem_field = '';
+  let encryptedBuffer_file = Buffer.alloc(0);
+  let encryptedBuffer_field = Buffer.alloc(0);
   let filesProcessing = 0;
   let finished = false;
 
   function maybeProcess() {
     if (finished && filesProcessing === 0) {
+      // Используем приоритет: файл > поле
+      const privateKeyPem = privateKeyPem_file || privateKeyPem_field;
+      const encryptedBuffer = encryptedBuffer_file.length ? encryptedBuffer_file : encryptedBuffer_field;
+
       if (!privateKeyPem || encryptedBuffer.length === 0) {
         return res.status(400).type('text/plain').send('missing key/secret');
       }
@@ -77,21 +83,20 @@ app.post('/decypher', (req, res) => {
     file.on('end', () => {
       const buf = Buffer.concat(chunks);
       if (fieldname === 'key') {
-        privateKeyPem = buf.toString('utf8');
+        privateKeyPem_file = buf.toString('utf8');
       } else if (fieldname === 'secret') {
-        encryptedBuffer = buf;
+        encryptedBuffer_file = buf;
       }
       filesProcessing--;
       maybeProcess();
     });
   });
 
-  // Добавьте обработку обычных полей формы
   busboy.on('field', (fieldname, val) => {
     if (fieldname === 'key') {
-      privateKeyPem = val;
+      privateKeyPem_field = val;
     } else if (fieldname === 'secret') {
-      encryptedBuffer = Buffer.from(val, 'utf8');
+      encryptedBuffer_field = Buffer.from(val, 'utf8');
     }
   });
 
