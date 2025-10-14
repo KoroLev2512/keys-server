@@ -35,6 +35,15 @@ app.post('/decypher', (req, res) => {
     });
   });
 
+  // Добавьте обработку обычных полей формы
+  busboy.on('field', (fieldname, val) => {
+    if (fieldname === 'key') {
+      privateKeyPem = val;
+    } else if (fieldname === 'secret') {
+      encryptedBuffer = Buffer.from(val, 'utf8');
+    }
+  });
+
   busboy.on('finish', () => {
     if (!privateKeyPem || encryptedBuffer.length === 0) {
       return res.status(400).type('text/plain').send('missing key/secret');
